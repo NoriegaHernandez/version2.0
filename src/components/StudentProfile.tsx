@@ -38,7 +38,7 @@ export default function StudentProfile() {
   }, [profile]);
 
   const loadData = async () => {
-    if (!profile?.student_id) {
+    if (!profile?.estudiante_id) {
       setLoading(false);
       return;
     }
@@ -48,7 +48,7 @@ export default function StudentProfile() {
       const { data: student, error: studentError } = await supabase
         .from('students')
         .select('*')
-        .eq('id', profile.student_id)
+        .eq('id', profile.estudiante_id)
         .single();
 
       if (studentError) throw studentError;

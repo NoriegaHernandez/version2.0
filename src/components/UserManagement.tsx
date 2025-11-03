@@ -52,7 +52,7 @@ export default function UserManagement() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
@@ -70,20 +70,22 @@ export default function UserManagement() {
         if (error) throw error;
         alert('Usuario actualizado correctamente');
       } else {
-        // Create new user (only admins can do this via admin API)
-        const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+        // Create new user using signUp
+        const { data: authData, error: authError } = await supabase.auth.signUp({
           email: formData.email,
           password: formData.password,
-          email_confirm: true,
-          user_metadata: {
-            full_name: formData.full_name,
-            role: formData.role,
+          options: {
+            data: {
+              full_name: formData.full_name,
+              role: formData.role,
+            },
+            emailRedirectTo: `${window.location.origin}`,
           },
         });
 
         if (authError) throw authError;
 
-        alert('Usuario creado correctamente. Se ha enviado un correo de verificación.');
+        alert('Usuario creado correctamente. Se ha enviado un correo de verificación al nuevo usuario.');
       }
 
       setShowForm(false);
@@ -98,7 +100,7 @@ export default function UserManagement() {
     }
   };
 
-  const handleEdit = (user: UserWithProfile) => {
+const handleEdit = (user: UserWithProfile) => {
     setEditingUser(user);
     setFormData({
       email: user.email,

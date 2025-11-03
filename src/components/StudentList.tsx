@@ -345,8 +345,8 @@ export default function StudentList() {
         .order('created_at', { ascending: false });
 
       // If student, only show their own records
-      if (profile?.role === 'student' && profile?.student_id) {
-        query = query.eq('student_id', profile.student_id);
+      if (profile?.role === 'student' && profile?.estudiante_id) {
+        query = query.eq('student_id', profile.estudiante_id);
       }
 
       if (filter !== 'all') {
