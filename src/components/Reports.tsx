@@ -24,45 +24,54 @@ export default function Reports() {
   const loadReportData = async () => {
     setLoading(true);
     try {
-      const { data: students } = await supabase.from('students').select('id');
+      // Total de estudiantes
+      const { data: students } = await supabase.from('estudiantes').select('id');
 
+      // Registros académicos
       const { data: records } = await supabase
-        .from('student_subject_records')
-        .select('status');
+        .from('registros_estudiante_materia')
+        .select('estado');
 
-      const { data: riskFactors } = await supabase
-        .from('student_risk_factors')
-        .select(`
-          risk_factors (name)
-        `);
-
-      const { data: semesterData } = await supabase
-        .from('student_subject_records')
-        .select('semester, status');
-
-      const { data: majorData } = await supabase
-        .from('student_subject_records')
-        .select(`
-          status,
-          students!inner (
-            majors (name)
-          )
-        `);
+      // También contar inscripciones en grupos
+      const { data: inscripciones } = await supabase
+        .from('inscripciones_grupo')
+        .select('calificacion_final');
 
       const totalStudents = students?.length || 0;
-      const totalRecords = records?.length || 0;
+      const totalRecords = (records?.length || 0) + (inscripciones?.length || 0);
 
-      const failed = records?.filter(r => r.status === 'failed').length || 0;
-      const dropout = records?.filter(r => r.status === 'dropout').length || 0;
-      const approved = records?.filter(r => r.status === 'approved').length || 0;
+      // Contar estados de registros_estudiante_materia
+      const approvedRecords = records?.filter(r => r.estado === 'aprobado').length || 0;
+      const failedRecords = records?.filter(r => r.estado === 'reprobado').length || 0;
+      const dropoutRecords = records?.filter(r => r.estado === 'baja').length || 0;
+
+      // Contar de inscripciones_grupo (basado en calificaciones)
+      const inscripcionesAprobadas = inscripciones?.filter(i => i.calificacion_final && i.calificacion_final >= 70).length || 0;
+      const inscripcionesReprobadas = inscripciones?.filter(i => i.calificacion_final && i.calificacion_final < 70).length || 0;
+
+      const approved = approvedRecords + inscripcionesAprobadas;
+      const failed = failedRecords + inscripcionesReprobadas;
+      const dropout = dropoutRecords;
 
       const failureRate = totalRecords > 0 ? (failed / totalRecords) * 100 : 0;
       const dropoutRate = totalRecords > 0 ? (dropout / totalRecords) * 100 : 0;
       const approvalRate = totalRecords > 0 ? (approved / totalRecords) * 100 : 0;
 
+      // Factores de riesgo más frecuentes
+      const { data: riskFactors } = await supabase
+        .from('factores_riesgo_estudiante')
+        .select(`
+          factores_riesgo!inner (
+            nombre,
+            categorias_factores_riesgo!inner (nombre)
+          )
+        `);
+
       const factorCounts = new Map<string, number>();
       riskFactors?.forEach((rf: any) => {
-        const name = rf.risk_factors?.name || 'Desconocido';
+        const name = rf.factores_riesgo?.categorias_factores_riesgo?.nombre || 
+                    rf.factores_riesgo?.nombre || 
+                    'Desconocido';
         factorCounts.set(name, (factorCounts.get(name) || 0) + 1);
       });
 
@@ -71,30 +80,45 @@ export default function Reports() {
         .sort((a, b) => b.count - a.count)
         .slice(0, 5);
 
+      // Análisis por semestre
+      const { data: semesterData } = await supabase
+        .from('registros_estudiante_materia')
+        .select('semestre, estado');
+
       const semesterMap = new Map<number, { failed: number; dropout: number }>();
       semesterData?.forEach((item: any) => {
-        const semester = item.semester;
+        const semester = item.semestre;
         if (!semesterMap.has(semester)) {
           semesterMap.set(semester, { failed: 0, dropout: 0 });
         }
         const current = semesterMap.get(semester)!;
-        if (item.status === 'failed') current.failed++;
-        if (item.status === 'dropout') current.dropout++;
+        if (item.estado === 'reprobado') current.failed++;
+        if (item.estado === 'baja') current.dropout++;
       });
 
       const bySemester = Array.from(semesterMap.entries())
         .map(([semester, counts]) => ({ semester, ...counts }))
         .sort((a, b) => a.semester - b.semester);
 
+      // Análisis por carrera
+      const { data: majorData } = await supabase
+        .from('registros_estudiante_materia')
+        .select(`
+          estado,
+          estudiantes!inner (
+            carreras (nombre)
+          )
+        `);
+
       const majorMap = new Map<string, { failed: number; dropout: number }>();
       majorData?.forEach((item: any) => {
-        const majorName = item.students?.majors?.name || 'Sin carrera';
+        const majorName = item.estudiantes?.carreras?.nombre || 'Sin carrera';
         if (!majorMap.has(majorName)) {
           majorMap.set(majorName, { failed: 0, dropout: 0 });
         }
         const current = majorMap.get(majorName)!;
-        if (item.status === 'failed') current.failed++;
-        if (item.status === 'dropout') current.dropout++;
+        if (item.estado === 'reprobado') current.failed++;
+        if (item.estado === 'baja') current.dropout++;
       });
 
       const byMajor = Array.from(majorMap.entries())
@@ -194,7 +218,10 @@ ${getRecommendations(data).join('\n')}
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
-        <div className="text-gray-500">Generando reporte...</div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-500">Generando reporte...</p>
+        </div>
       </div>
     );
   }
@@ -260,18 +287,22 @@ ${getRecommendations(data).join('\n')}
             <h3 className="font-semibold text-gray-800 mb-3">
               Factores de Riesgo Más Frecuentes
             </h3>
-            <div className="space-y-2">
-              {data.topRiskFactors.map((factor, index) => (
-                <div key={index} className="flex justify-between items-center bg-gray-50 px-4 py-2 rounded">
-                  <span className="text-sm text-gray-700">
-                    {index + 1}. {factor.factor}
-                  </span>
-                  <span className="text-sm font-semibold text-gray-900">
-                    {factor.count} casos
-                  </span>
-                </div>
-              ))}
-            </div>
+            {data.topRiskFactors.length > 0 ? (
+              <div className="space-y-2">
+                {data.topRiskFactors.map((factor, index) => (
+                  <div key={index} className="flex justify-between items-center bg-gray-50 px-4 py-2 rounded">
+                    <span className="text-sm text-gray-700">
+                      {index + 1}. {factor.factor}
+                    </span>
+                    <span className="text-sm font-semibold text-gray-900">
+                      {factor.count} casos
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500 italic">No hay factores de riesgo registrados</p>
+            )}
           </div>
 
           <div className="border-t pt-4">

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { BookOpen, Users, Edit2, Save, X } from 'lucide-react';
+import { BookOpen, Users, Edit2, Save, X, AlertTriangle, Plus } from 'lucide-react';
 
 interface Grupo {
   id: string;
@@ -23,7 +23,21 @@ interface EstudianteGrupo {
 
 interface CalificacionForm {
   inscripcion_id: string;
-  calificacion_final: number | null;
+  calificacion_final: string;
+}
+
+interface CategoriaRiesgo {
+  id: string;
+  nombre: string;
+  descripcion: string;
+}
+
+interface FactorRiesgo {
+  id: string;
+  categoria_id: string;
+  inscripcion_id: string;
+  severidad: 'baja' | 'media' | 'alta';
+  observaciones: string;
 }
 
 export default function TeacherGroupsView() {
@@ -33,12 +47,30 @@ export default function TeacherGroupsView() {
   const [estudiantes, setEstudiantes] = useState<EstudianteGrupo[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingGrade, setEditingGrade] = useState<CalificacionForm | null>(null);
+  const [showRiskModal, setShowRiskModal] = useState(false);
+  const [selectedEstudiante, setSelectedEstudiante] = useState<EstudianteGrupo | null>(null);
+  const [categorias, setCategorias] = useState<CategoriaRiesgo[]>([]);
+  const [factoresRiesgo, setFactoresRiesgo] = useState<FactorRiesgo[]>([]);
 
   useEffect(() => {
     if (profile?.id) {
       loadGrupos();
+      loadCategorias();
     }
   }, [profile]);
+
+  const loadCategorias = async () => {
+    try {
+      const { data } = await supabase
+        .from('categorias_factores_riesgo')
+        .select('*')
+        .order('nombre');
+      
+      if (data) setCategorias(data);
+    } catch (error) {
+      console.error('Error cargando categorías:', error);
+    }
+  };
 
   const loadGrupos = async () => {
     if (!profile?.id) return;
@@ -126,39 +158,225 @@ export default function TeacherGroupsView() {
   const handleEditGrade = (estudiante: EstudianteGrupo) => {
     setEditingGrade({
       inscripcion_id: estudiante.inscripcion_id,
-      calificacion_final: estudiante.calificacion_final,
+      calificacion_final: estudiante.calificacion_final?.toString() || '',
     });
   };
 
   const handleSaveGrade = async () => {
     if (!editingGrade) return;
 
+    const calificacion = editingGrade.calificacion_final.trim() === '' 
+      ? null 
+      : parseFloat(editingGrade.calificacion_final);
+
+    if (calificacion !== null && (calificacion < 0 || calificacion > 100)) {
+      alert('La calificación debe estar entre 0 y 100');
+      return;
+    }
+
     setLoading(true);
     try {
-      const { error } = await supabase
+      // Actualizar la inscripción con la calificación
+      const updateData: any = {
+        calificacion_final: calificacion,
+      };
+
+      if (calificacion !== null) {
+        updateData.estado = calificacion >= 70 ? 'completado' : 'completado';
+      }
+
+      const { error: inscripcionError } = await supabase
         .from('inscripciones_grupo')
-        .update({
-          calificacion_final: editingGrade.calificacion_final,
-          estado: editingGrade.calificacion_final && editingGrade.calificacion_final >= 70 
-            ? 'completado' 
-            : editingGrade.calificacion_final !== null 
-              ? 'completado' 
-              : 'activo'
-        })
+        .update(updateData)
         .eq('id', editingGrade.inscripcion_id);
 
-      if (error) throw error;
+      if (inscripcionError) throw inscripcionError;
+
+      // Encontrar el estudiante y grupo actual
+      const estudiante = estudiantes.find(e => e.inscripcion_id === editingGrade.inscripcion_id);
+      
+      if (estudiante && selectedGrupo) {
+        // Obtener la materia_id del grupo
+        const { data: grupoData, error: grupoError } = await supabase
+          .from('grupos_materia')
+          .select('materia_id, semestre_periodo')
+          .eq('id', selectedGrupo.id)
+          .single();
+
+        if (grupoError) throw grupoError;
+
+        // Verificar si existe un registro en registros_estudiante_materia
+        const { data: existingRecord } = await supabase
+          .from('registros_estudiante_materia')
+          .select('id')
+          .eq('estudiante_id', estudiante.id)
+          .eq('materia_id', grupoData.materia_id)
+          .eq('semestre', grupoData.semestre_periodo)
+          .maybeSingle();
+
+        if (existingRecord) {
+          // Actualizar el registro existente
+          const { error: updateRecordError } = await supabase
+            .from('registros_estudiante_materia')
+            .update({
+              calificacion_final: calificacion,
+              estado: calificacion !== null ? (calificacion >= 70 ? 'aprobado' : 'reprobado') : 'en_progreso',
+              actualizado_en: new Date().toISOString(),
+            })
+            .eq('id', existingRecord.id);
+
+          if (updateRecordError) throw updateRecordError;
+        } else {
+          // Crear un nuevo registro
+          const { error: insertRecordError } = await supabase
+            .from('registros_estudiante_materia')
+            .insert({
+              estudiante_id: estudiante.id,
+              materia_id: grupoData.materia_id,
+              semestre: grupoData.semestre_periodo,
+              calificacion_final: calificacion,
+              estado: calificacion !== null ? (calificacion >= 70 ? 'aprobado' : 'reprobado') : 'en_progreso',
+            });
+
+          if (insertRecordError) throw insertRecordError;
+        }
+      }
 
       alert('Calificación guardada correctamente');
       setEditingGrade(null);
       if (selectedGrupo) {
-        loadEstudiantes(selectedGrupo.id);
+        await loadEstudiantes(selectedGrupo.id);
       }
     } catch (error: any) {
-      console.error('Error:', error);
+      console.error('Error completo:', error);
       alert(`Error al guardar: ${error.message}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleManageRisks = async (estudiante: EstudianteGrupo) => {
+    setSelectedEstudiante(estudiante);
+    
+    // Cargar factores de riesgo existentes para este estudiante
+    try {
+      const { data: registroMateria } = await supabase
+        .from('registros_estudiante_materia')
+        .select('id')
+        .eq('estudiante_id', estudiante.id)
+        .maybeSingle();
+
+      if (registroMateria) {
+        const { data: factores } = await supabase
+          .from('factores_riesgo_estudiante')
+          .select(`
+            id,
+            factor_riesgo_id,
+            severidad,
+            observaciones,
+            factores_riesgo!inner (categoria_id)
+          `)
+          .eq('registro_estudiante_materia_id', registroMateria.id);
+
+        if (factores) {
+          const factoresFormateados = factores.map((f: any) => ({
+            id: f.id,
+            categoria_id: f.factores_riesgo.categoria_id,
+            inscripcion_id: estudiante.inscripcion_id,
+            severidad: f.severidad as 'baja' | 'media' | 'alta',
+            observaciones: f.observaciones || '',
+          }));
+          setFactoresRiesgo(factoresFormateados);
+        }
+      }
+    } catch (error) {
+      console.error('Error cargando factores:', error);
+    }
+    
+    setShowRiskModal(true);
+  };
+
+  const handleAddRiskFactor = async (categoriaId: string) => {
+    if (!selectedEstudiante) return;
+
+    try {
+      // Primero obtener o crear el registro de estudiante-materia
+      let registroId: string;
+      
+      const { data: existingRegistro } = await supabase
+        .from('registros_estudiante_materia')
+        .select('id')
+        .eq('estudiante_id', selectedEstudiante.id)
+        .maybeSingle();
+
+      if (existingRegistro) {
+        registroId = existingRegistro.id;
+      } else {
+        // Necesitamos crear un registro básico
+        const { data: grupoData } = await supabase
+          .from('inscripciones_grupo')
+          .select('grupos_materia!inner(materia_id)')
+          .eq('id', selectedEstudiante.inscripcion_id)
+          .single();
+
+        const { data: newRegistro, error: regError } = await supabase
+          .from('registros_estudiante_materia')
+          .insert({
+            estudiante_id: selectedEstudiante.id,
+            materia_id: (grupoData as any).grupos_materia.materia_id,
+            semestre: 1,
+            estado: 'en_progreso',
+          })
+          .select()
+          .single();
+
+        if (regError) throw regError;
+        registroId = newRegistro.id;
+      }
+
+      // Obtener o crear el factor de riesgo
+      const { data: existingFactor } = await supabase
+        .from('factores_riesgo')
+        .select('id')
+        .eq('categoria_id', categoriaId)
+        .maybeSingle();
+
+      let factorId: string;
+      if (existingFactor) {
+        factorId = existingFactor.id;
+      } else {
+        const categoria = categorias.find(c => c.id === categoriaId);
+        const { data: newFactor, error: factorError } = await supabase
+          .from('factores_riesgo')
+          .insert({
+            categoria_id: categoriaId,
+            nombre: categoria?.nombre || 'Factor',
+            descripcion: categoria?.descripcion,
+          })
+          .select()
+          .single();
+
+        if (factorError) throw factorError;
+        factorId = newFactor.id;
+      }
+
+      // Insertar el factor de riesgo del estudiante
+      const { error } = await supabase
+        .from('factores_riesgo_estudiante')
+        .insert({
+          registro_estudiante_materia_id: registroId,
+          factor_riesgo_id: factorId,
+          severidad: 'media',
+          observaciones: '',
+        });
+
+      if (error) throw error;
+
+      alert('Factor de riesgo agregado');
+      handleManageRisks(selectedEstudiante);
+    } catch (error: any) {
+      console.error('Error:', error);
+      alert(`Error: ${error.message}`);
     }
   };
 
@@ -188,7 +406,6 @@ export default function TeacherGroupsView() {
 
   return (
     <div className="space-y-6">
-      {/* Grupos List */}
       <div className="bg-white rounded-lg shadow-lg p-6">
         <div className="flex items-center gap-3 mb-6">
           <BookOpen className="w-8 h-8 text-blue-600" />
@@ -227,7 +444,6 @@ export default function TeacherGroupsView() {
         </div>
       </div>
 
-      {/* Estudiantes List */}
       {selectedGrupo && (
         <div className="bg-white rounded-lg shadow-lg p-6">
           <div className="flex items-center justify-between mb-6">
@@ -292,10 +508,10 @@ export default function TeacherGroupsView() {
                             min="0"
                             max="100"
                             step="0.01"
-                            value={editingGrade.calificacion_final || ''}
+                            value={editingGrade.calificacion_final}
                             onChange={(e) => setEditingGrade({
                               ...editingGrade,
-                              calificacion_final: e.target.value ? parseFloat(e.target.value) : null,
+                              calificacion_final: e.target.value,
                             })}
                             className="w-24 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
                             autoFocus
@@ -326,33 +542,44 @@ export default function TeacherGroupsView() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        {editingGrade?.inscripcion_id === estudiante.inscripcion_id ? (
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={handleSaveGrade}
-                              disabled={loading}
-                              className="text-green-600 hover:text-green-800 p-1"
-                              title="Guardar"
-                            >
-                              <Save className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => setEditingGrade(null)}
-                              className="text-gray-600 hover:text-gray-800 p-1"
-                              title="Cancelar"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => handleEditGrade(estudiante)}
-                            className="text-blue-600 hover:text-blue-800 p-1"
-                            title="Editar calificación"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {editingGrade?.inscripcion_id === estudiante.inscripcion_id ? (
+                            <>
+                              <button
+                                onClick={handleSaveGrade}
+                                disabled={loading}
+                                className="text-green-600 hover:text-green-800 p-1"
+                                title="Guardar"
+                              >
+                                <Save className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => setEditingGrade(null)}
+                                className="text-gray-600 hover:text-gray-800 p-1"
+                                title="Cancelar"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => handleEditGrade(estudiante)}
+                                className="text-blue-600 hover:text-blue-800 p-1"
+                                title="Editar calificación"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleManageRisks(estudiante)}
+                                className="text-orange-600 hover:text-orange-800 p-1"
+                                title="Factores de riesgo"
+                              >
+                                <AlertTriangle className="w-4 h-4" />
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -367,8 +594,89 @@ export default function TeacherGroupsView() {
               <li>• Haz clic en el ícono de editar para calificar a un estudiante</li>
               <li>• Ingresa la calificación final (0-100)</li>
               <li>• Calificación ≥ 70 es aprobatoria</li>
-              <li>• Los cambios se guardan automáticamente</li>
+              <li>• Usa el ícono de alerta para gestionar factores de riesgo</li>
             </ul>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Factores de Riesgo */}
+      {showRiskModal && selectedEstudiante && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <div className="flex justify-between items-center mb-4">
+              <div>
+                <h3 className="text-xl font-bold text-gray-800">Factores de Riesgo</h3>
+                <p className="text-sm text-gray-600">
+                  {selectedEstudiante.apellido_paterno} {selectedEstudiante.apellido_materno}, {selectedEstudiante.nombre}
+                </p>
+              </div>
+              <button onClick={() => setShowRiskModal(false)} className="text-gray-500">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {factoresRiesgo.length > 0 && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-yellow-900 mb-2">
+                    Factores Identificados ({factoresRiesgo.length})
+                  </h4>
+                  <div className="space-y-2">
+                    {factoresRiesgo.map((factor) => {
+                      const categoria = categorias.find(c => c.id === factor.categoria_id);
+                      return (
+                        <div key={factor.id} className="bg-white px-3 py-2 rounded flex justify-between items-center">
+                          <span className="text-sm text-gray-700">{categoria?.nombre}</span>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            factor.severidad === 'alta' ? 'bg-red-100 text-red-800' :
+                            factor.severidad === 'media' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-green-100 text-green-800'
+                          }`}>
+                            {factor.severidad}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <h4 className="font-semibold text-gray-800 mb-2">Agregar Factor de Riesgo</h4>
+                <div className="space-y-2">
+                  {categorias.map((categoria) => (
+                    <button
+                      key={categoria.id}
+                      onClick={() => handleAddRiskFactor(categoria.id)}
+                      disabled={factoresRiesgo.some(f => f.categoria_id === categoria.id)}
+                      className="w-full p-3 text-left border rounded-lg hover:bg-gray-50 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-medium text-gray-800">{categoria.nombre}</p>
+                          {categoria.descripcion && (
+                            <p className="text-xs text-gray-600">{categoria.descripcion}</p>
+                          )}
+                        </div>
+                        {!factoresRiesgo.some(f => f.categoria_id === categoria.id) && (
+                          <Plus className="w-5 h-5 text-blue-600" />
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t">
+              <button
+                onClick={() => setShowRiskModal(false)}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                Cerrar
+              </button>
+            </div>
           </div>
         </div>
       )}

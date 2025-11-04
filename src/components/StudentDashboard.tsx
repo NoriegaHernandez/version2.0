@@ -21,14 +21,12 @@ interface Carrera {
 interface Calificacion {
   id: string;
   calificacion_final: number | null;
-  estado: string;
   grupos_materia: {
     nombre_grupo: string;
     periodo_academico: string;
-    materias: {
-      nombre: string;
-    };
+    materia_id: string;
   };
+  materia_nombre: string;
 }
 
 export default function StudentDashboard() {
@@ -49,26 +47,42 @@ export default function StudentDashboard() {
   });
 
   useEffect(() => {
-    if (profile?.estudiante_id) {
-      loadData();
-    }
-  }, [profile]);
+    loadData();
+  }, [user]);
 
   const loadData = async () => {
-    if (!profile?.estudiante_id) {
+    if (!user?.id) {
       setLoading(false);
       return;
     }
 
     setLoading(true);
     try {
-      const { data: estudiante, error: estudianteError } = await supabase
+      // Primero intentar obtener el estudiante asociado al user_id
+      const { data: estudianteByUser, error: userError } = await supabase
         .from('estudiantes')
         .select('*')
-        .eq('id', profile.estudiante_id)
-        .single();
+        .eq('user_id', user.id)
+        .maybeSingle();
 
-      if (estudianteError) throw estudianteError;
+      let estudiante = estudianteByUser;
+
+      // Si no existe, intentar obtener por profile.estudiante_id
+      if (!estudiante && profile?.estudiante_id) {
+        const { data: estudianteByProfile } = await supabase
+          .from('estudiantes')
+          .select('*')
+          .eq('id', profile.estudiante_id)
+          .maybeSingle();
+        
+        estudiante = estudianteByProfile;
+      }
+
+      if (!estudiante) {
+        console.error('No se encontró estudiante para este usuario');
+        setLoading(false);
+        return;
+      }
 
       setEstudianteData(estudiante);
       setFormData({
@@ -79,6 +93,7 @@ export default function StudentDashboard() {
         semestre_actual: estudiante.semestre_actual,
       });
 
+      // Cargar carreras
       const { data: carrerasData } = await supabase
         .from('carreras')
         .select('id, nombre')
@@ -86,39 +101,46 @@ export default function StudentDashboard() {
 
       if (carrerasData) setCarreras(carrerasData);
 
-      const { data: calificacionesData, error: calError } = await supabase
+      // Cargar calificaciones del estudiante
+      const { data: inscripciones, error: inscError } = await supabase
         .from('inscripciones_grupo')
         .select(`
           id,
           calificacion_final,
-          estado,
           grupos_materia!inner (
             nombre_grupo,
             periodo_academico,
-            materias!inner (
-              nombre
-            )
+            materia_id
           )
         `)
-        .eq('estudiante_id', profile.estudiante_id)
+        .eq('estudiante_id', estudiante.id)
         .order('fecha_inscripcion', { ascending: false });
 
-      if (calError) throw calError;
-      
-      const calificacionesFormateadas = (calificacionesData || []).map((item: any) => ({
-        id: item.id,
-        calificacion_final: item.calificacion_final,
-        estado: item.estado,
-        grupos_materia: {
-          nombre_grupo: item.grupos_materia.nombre_grupo,
-          periodo_academico: item.grupos_materia.periodo_academico,
-          materias: {
-            nombre: item.grupos_materia.materias.nombre
-          }
-        }
-      }));
-      
-      setCalificaciones(calificacionesFormateadas);
+      if (inscError) {
+        console.error('Error cargando inscripciones:', inscError);
+      } else if (inscripciones) {
+        // Obtener los nombres de las materias
+        const materiaIds = inscripciones.map((i: any) => i.grupos_materia.materia_id);
+        const { data: materiasData } = await supabase
+          .from('materias')
+          .select('id, nombre')
+          .in('id', materiaIds);
+
+        const materiasMap = new Map(materiasData?.map(m => [m.id, m.nombre]));
+
+        const calificacionesFormateadas = inscripciones.map((item: any) => ({
+          id: item.id,
+          calificacion_final: item.calificacion_final,
+          grupos_materia: {
+            nombre_grupo: item.grupos_materia.nombre_grupo,
+            periodo_academico: item.grupos_materia.periodo_academico,
+            materia_id: item.grupos_materia.materia_id,
+          },
+          materia_nombre: materiasMap.get(item.grupos_materia.materia_id) || 'Sin nombre',
+        }));
+        
+        setCalificaciones(calificacionesFormateadas);
+      }
     } catch (error) {
       console.error('Error cargando datos:', error);
     } finally {
@@ -175,7 +197,10 @@ export default function StudentDashboard() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
-        <div className="text-gray-500">Cargando información...</div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-500">Cargando información...</p>
+        </div>
       </div>
     );
   }
@@ -389,7 +414,7 @@ export default function StudentDashboard() {
                       {calificaciones.map((cal) => (
                         <tr key={cal.id} className="border-b border-gray-100 hover:bg-gray-50">
                           <td className="px-4 py-3 text-sm text-gray-900 font-medium">
-                            {cal.grupos_materia.materias.nombre}
+                            {cal.materia_nombre}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">{cal.grupos_materia.nombre_grupo}</td>
                           <td className="px-4 py-3 text-sm text-gray-700">{cal.grupos_materia.periodo_academico}</td>
