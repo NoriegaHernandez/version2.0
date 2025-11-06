@@ -70,20 +70,25 @@ const handleSubmit = async (e: React.FormEvent) => {
         if (error) throw error;
         alert('Usuario actualizado correctamente');
       } else {
-        // Create new user using signUp
-        const { data: authData, error: authError } = await supabase.auth.signUp({
-          email: formData.email,
-          password: formData.password,
-          options: {
-            data: {
-              full_name: formData.full_name,
-              role: formData.role,
-            },
-            emailRedirectTo: `${window.location.origin}`,
-          },
-        });
+const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+  email: formData.email,
+  password: formData.password,
+  email_confirm: true, // opcional: marca el correo como verificado
+  user_metadata: {
+    full_name: formData.full_name,
+    role: formData.role,
+  },
+});
 
-        if (authError) throw authError;
+if (authError) {
+  if (authError.message.includes('duplicate key')) {
+    alert('Ya existe un usuario con ese correo electrónico.');
+  } else {
+    console.error('Error creando usuario:', authError);
+    alert(`Error creando usuario: ${authError.message}`);
+  }
+  throw authError;
+}
 
         alert('Usuario creado correctamente. Se ha enviado un correo de verificación al nuevo usuario.');
       }

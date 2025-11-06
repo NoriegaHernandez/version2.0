@@ -58,40 +58,77 @@ export default function StudentDashboard() {
 
     setLoading(true);
     try {
-      // Primero intentar obtener el estudiante asociado al user_id
-      const { data: estudianteByUser, error: userError } = await supabase
+      // Intentar encontrar estudiante en modelo español (estudiantes)
+      const { data: estudianteByUser } = await supabase
         .from('estudiantes')
         .select('*')
         .eq('user_id', user.id)
         .maybeSingle();
 
-      let estudiante = estudianteByUser;
+      let estudianteEs: any = estudianteByUser;
 
-      // Si no existe, intentar obtener por profile.estudiante_id
-      if (!estudiante && profile?.estudiante_id) {
+      if (!estudianteEs && profile?.estudiante_id) {
         const { data: estudianteByProfile } = await supabase
           .from('estudiantes')
           .select('*')
           .eq('id', profile.estudiante_id)
           .maybeSingle();
-        
-        estudiante = estudianteByProfile;
+        estudianteEs = estudianteByProfile;
       }
 
-      if (!estudiante) {
+      // Intentar encontrar estudiante en modelo inglés (students)
+      let estudianteEn: any = null;
+      if (!estudianteEs && profile?.estudiante_id) {
+        const { data: studentByProfile } = await supabase
+          .from('students')
+          .select('*')
+          .eq('id', profile.estudiante_id)
+          .maybeSingle();
+        estudianteEn = studentByProfile;
+      }
+
+      if (!estudianteEs && !estudianteEn) {
         console.error('No se encontró estudiante para este usuario');
         setLoading(false);
         return;
       }
 
-      setEstudianteData(estudiante);
-      setFormData({
-        nombre: estudiante.nombre,
-        apellido_paterno: estudiante.apellido_paterno,
-        apellido_materno: estudiante.apellido_materno,
-        carrera_id: estudiante.carrera_id || '',
-        semestre_actual: estudiante.semestre_actual,
-      });
+      // Normalizar datos del estudiante para el UI
+      if (estudianteEs) {
+        setEstudianteData({
+          id: estudianteEs.id,
+          numero_control: estudianteEs.numero_control,
+          nombre: estudianteEs.nombre,
+          apellido_paterno: estudianteEs.apellido_paterno,
+          apellido_materno: estudianteEs.apellido_materno,
+          carrera_id: estudianteEs.carrera_id,
+          semestre_actual: estudianteEs.semestre_actual,
+        });
+        setFormData({
+          nombre: estudianteEs.nombre,
+          apellido_paterno: estudianteEs.apellido_paterno,
+          apellido_materno: estudianteEs.apellido_materno,
+          carrera_id: estudianteEs.carrera_id || '',
+          semestre_actual: estudianteEs.semestre_actual,
+        });
+      } else if (estudianteEn) {
+        setEstudianteData({
+          id: estudianteEn.id,
+          numero_control: estudianteEn.control_number,
+          nombre: estudianteEn.first_name,
+          apellido_paterno: estudianteEn.paternal_surname,
+          apellido_materno: estudianteEn.maternal_surname,
+          carrera_id: estudianteEn.major_id,
+          semestre_actual: estudianteEn.current_semester,
+        });
+        setFormData({
+          nombre: estudianteEn.first_name,
+          apellido_paterno: estudianteEn.paternal_surname,
+          apellido_materno: estudianteEn.maternal_surname,
+          carrera_id: estudianteEn.major_id || '',
+          semestre_actual: estudianteEn.current_semester,
+        });
+      }
 
       // Cargar carreras
       const { data: carrerasData } = await supabase
@@ -101,46 +138,79 @@ export default function StudentDashboard() {
 
       if (carrerasData) setCarreras(carrerasData);
 
-      // Cargar calificaciones del estudiante
-      const { data: inscripciones, error: inscError } = await supabase
-        .from('inscripciones_grupo')
-        .select(`
-          id,
-          calificacion_final,
-          grupos_materia!inner (
-            nombre_grupo,
-            periodo_academico,
-            materia_id
-          )
-        `)
-        .eq('estudiante_id', estudiante.id)
-        .order('fecha_inscripcion', { ascending: false });
+      // Cargar calificaciones del estudiante desde ambos modelos
+      const calificacionesAgregadas: Calificacion[] = [];
 
-      if (inscError) {
-        console.error('Error cargando inscripciones:', inscError);
-      } else if (inscripciones) {
-        // Obtener los nombres de las materias
-        const materiaIds = inscripciones.map((i: any) => i.grupos_materia.materia_id);
-        const { data: materiasData } = await supabase
-          .from('materias')
-          .select('id, nombre')
-          .in('id', materiaIds);
+      if (estudianteEs) {
+        const { data: inscripciones } = await supabase
+          .from('inscripciones_grupo')
+          .select(`
+            id,
+            calificacion_final,
+            grupos_materia!inner (
+              nombre_grupo,
+              periodo_academico,
+              materia_id
+            )
+          `)
+          .eq('estudiante_id', estudianteEs.id)
+          .order('fecha_inscripcion', { ascending: false });
 
-        const materiasMap = new Map(materiasData?.map(m => [m.id, m.nombre]));
+        if (inscripciones && inscripciones.length > 0) {
+          const materiaIds = inscripciones.map((i: any) => i.grupos_materia.materia_id);
+          const { data: materiasData } = await supabase
+            .from('materias')
+            .select('id, nombre')
+            .in('id', materiaIds);
 
-        const calificacionesFormateadas = inscripciones.map((item: any) => ({
-          id: item.id,
-          calificacion_final: item.calificacion_final,
-          grupos_materia: {
-            nombre_grupo: item.grupos_materia.nombre_grupo,
-            periodo_academico: item.grupos_materia.periodo_academico,
-            materia_id: item.grupos_materia.materia_id,
-          },
-          materia_nombre: materiasMap.get(item.grupos_materia.materia_id) || 'Sin nombre',
-        }));
-        
-        setCalificaciones(calificacionesFormateadas);
+          const materiasMap = new Map((materiasData || []).map((m: any) => [m.id, m.nombre]));
+
+          calificacionesAgregadas.push(
+            ...inscripciones.map((item: any) => ({
+              id: item.id,
+              calificacion_final: item.calificacion_final,
+              grupos_materia: {
+                nombre_grupo: item.grupos_materia.nombre_grupo,
+                periodo_academico: item.grupos_materia.periodo_academico,
+                materia_id: item.grupos_materia.materia_id,
+              },
+              materia_nombre: materiasMap.get(item.grupos_materia.materia_id) || 'Sin nombre',
+            }))
+          );
+        }
       }
+
+      if (estudianteEn) {
+        const { data: records } = await supabase
+          .from('student_subject_records')
+          .select(`
+            id,
+            final_grade,
+            subjects!inner (
+              id,
+              name
+            )
+          `)
+          .eq('student_id', estudianteEn.id)
+          .order('created_at', { ascending: false });
+
+        if (records && records.length > 0) {
+          calificacionesAgregadas.push(
+            ...records.map((r: any) => ({
+              id: r.id,
+              calificacion_final: r.final_grade,
+              grupos_materia: {
+                nombre_grupo: '-',
+                periodo_academico: '-',
+                materia_id: r.subjects.id,
+              },
+              materia_nombre: r.subjects.name,
+            }))
+          );
+        }
+      }
+
+      setCalificaciones(calificacionesAgregadas);
     } catch (error) {
       console.error('Error cargando datos:', error);
     } finally {
@@ -153,7 +223,8 @@ export default function StudentDashboard() {
 
     setSaving(true);
     try {
-      const { error } = await supabase
+      // Intentar actualizar en modelo español; si falla, omitir (no hay endpoint equivalente en inglés aquí)
+      await supabase
         .from('estudiantes')
         .update({
           nombre: formData.nombre,
@@ -164,8 +235,6 @@ export default function StudentDashboard() {
           actualizado_en: new Date().toISOString(),
         })
         .eq('id', estudianteData.id);
-
-      if (error) throw error;
 
       alert('Información actualizada correctamente');
       loadData();

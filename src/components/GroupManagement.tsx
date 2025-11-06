@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Users, Plus, Edit, Trash2, BookOpen, UserPlus, Calendar, X } from 'lucide-react';
+import { Users, Plus, Edit, Trash2, BookOpen, UserPlus, Calendar, X, RefreshCw } from 'lucide-react';
 
 interface Materia {
   id: string;
@@ -35,6 +35,7 @@ interface Estudiante {
   nombre: string;
   apellido_paterno: string;
   apellido_materno: string;
+  ya_inscrito?: boolean;
 }
 
 export default function GroupManagement() {
@@ -99,7 +100,7 @@ export default function GroupManagement() {
               .from('inscripciones_grupo')
               .select('id', { count: 'exact', head: true })
               .eq('grupo_id', grupo.id)
-              .eq('estado', 'activo');
+              .in('estado', ['activo', 'completado']); // Incluir ambos estados
 
             return { ...grupo, inscritos: count || 0 };
           })
@@ -117,6 +118,30 @@ export default function GroupManagement() {
       console.error('Error cargando datos:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadAvailableStudents = async (grupoId: string) => {
+    try {
+      // Obtener estudiantes ya inscritos en este grupo
+      const { data: inscritosData } = await supabase
+        .from('inscripciones_grupo')
+        .select('estudiante_id')
+        .eq('grupo_id', grupoId)
+        .in('estado', ['activo', 'completado']);
+
+      const estudiantesInscritos = new Set(inscritosData?.map(i => i.estudiante_id) || []);
+
+      // Marcar estudiantes ya inscritos
+      const estudiantesDisponibles = estudiantes.map(est => ({
+        ...est,
+        ya_inscrito: estudiantesInscritos.has(est.id)
+      }));
+
+      return estudiantesDisponibles;
+    } catch (error) {
+      console.error('Error cargando estudiantes disponibles:', error);
+      return estudiantes;
     }
   };
 
@@ -144,7 +169,7 @@ export default function GroupManagement() {
           .eq('id', editingGroup.id);
 
         if (error) throw error;
-        alert('Grupo actualizado correctamente');
+        alert('✅ Grupo actualizado correctamente');
       } else {
         const { error } = await supabase
           .from('grupos_materia')
@@ -159,16 +184,16 @@ export default function GroupManagement() {
           });
 
         if (error) throw error;
-        alert('Grupo creado correctamente');
+        alert('✅ Grupo creado correctamente');
       }
 
       setShowForm(false);
       setEditingGroup(null);
       resetForm();
-      loadData();
+      await loadData(); // Esperar a que se recarguen los datos
     } catch (error: any) {
       console.error('Error:', error);
-      alert(`Error: ${error.message}`);
+      alert(`❌ Error: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -189,10 +214,11 @@ export default function GroupManagement() {
   };
 
   const handleDelete = async (grupoId: string) => {
-    if (!confirm('¿Eliminar este grupo? Se eliminarán todas las inscripciones y calificaciones asociadas.')) {
+    if (!confirm('⚠️ ¿Eliminar este grupo? Se eliminarán todas las inscripciones y calificaciones asociadas.')) {
       return;
     }
 
+    setLoading(true);
     try {
       const { error } = await supabase
         .from('grupos_materia')
@@ -200,15 +226,18 @@ export default function GroupManagement() {
         .eq('id', grupoId);
 
       if (error) throw error;
-      alert('Grupo eliminado correctamente');
-      loadData();
+      alert('✅ Grupo eliminado correctamente');
+      await loadData();
     } catch (error: any) {
       console.error('Error:', error);
-      alert(`Error al eliminar: ${error.message}`);
+      alert(`❌ Error al eliminar: ${error.message}`);
+    } finally {
+      setLoading(false);
     }
   };
 
   const toggleGroupStatus = async (grupo: GrupoMateria) => {
+    setLoading(true);
     try {
       const { error } = await supabase
         .from('grupos_materia')
@@ -216,19 +245,50 @@ export default function GroupManagement() {
         .eq('id', grupo.id);
 
       if (error) throw error;
-      loadData();
+      await loadData();
     } catch (error: any) {
       console.error('Error:', error);
-      alert(`Error: ${error.message}`);
+      alert(`❌ Error: ${error.message}`);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  const handleOpenEnrollForm = async (grupo: GrupoMateria) => {
+    setSelectedGroup(grupo);
+    const estudiantesDisponibles = await loadAvailableStudents(grupo.id);
+    setEstudiantes(estudiantesDisponibles);
+    setShowEnrollForm(true);
   };
 
   const handleEnrollStudents = async () => {
     if (!selectedGroup || selectedStudents.length === 0) return;
 
+    // Verificar cupo disponible
+    const cupoDisponible = selectedGroup.cupo_maximo - selectedGroup.inscritos;
+    if (selectedStudents.length > cupoDisponible) {
+      alert(`⚠️ Solo hay ${cupoDisponible} lugares disponibles. Has seleccionado ${selectedStudents.length} estudiantes.`);
+      return;
+    }
+
     setLoading(true);
     try {
-      const inscripciones = selectedStudents.map(estudianteId => ({
+      // Verificar duplicados antes de insertar
+      const { data: existentes } = await supabase
+        .from('inscripciones_grupo')
+        .select('estudiante_id')
+        .eq('grupo_id', selectedGroup.id)
+        .in('estudiante_id', selectedStudents);
+
+      const yaInscritos = new Set(existentes?.map(e => e.estudiante_id) || []);
+      const nuevosEstudiantes = selectedStudents.filter(id => !yaInscritos.has(id));
+
+      if (nuevosEstudiantes.length === 0) {
+        alert('⚠️ Todos los estudiantes seleccionados ya están inscritos en este grupo');
+        return;
+      }
+
+      const inscripciones = nuevosEstudiantes.map(estudianteId => ({
         grupo_id: selectedGroup.id,
         estudiante_id: estudianteId,
         estado: 'activo',
@@ -240,14 +300,21 @@ export default function GroupManagement() {
 
       if (error) throw error;
 
-      alert(`${selectedStudents.length} estudiante(s) inscrito(s) correctamente`);
+      alert(`✅ ${nuevosEstudiantes.length} estudiante(s) inscrito(s) correctamente`);
+      
+      if (yaInscritos.size > 0) {
+        alert(`ℹ️ ${yaInscritos.size} estudiante(s) ya estaban inscritos`);
+      }
+
       setShowEnrollForm(false);
       setSelectedGroup(null);
       setSelectedStudents([]);
-      loadData();
+      
+      // Recargar datos para actualizar el conteo
+      await loadData();
     } catch (error: any) {
       console.error('Error:', error);
-      alert(`Error al inscribir: ${error.message}`);
+      alert(`❌ Error al inscribir: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -279,23 +346,41 @@ export default function GroupManagement() {
             </div>
           </div>
 
-          <button
-            onClick={() => {
-              setEditingGroup(null);
-              resetForm();
-              setShowForm(true);
-            }}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Nuevo Grupo
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={loadData}
+              disabled={loading}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+              title="Actualizar"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              Actualizar
+            </button>
+            <button
+              onClick={() => {
+                setEditingGroup(null);
+                resetForm();
+                setShowForm(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              Nuevo Grupo
+            </button>
+          </div>
         </div>
 
         {loading && grupos.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">Cargando...</div>
+          <div className="text-center py-12 text-gray-500">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+            Cargando grupos...
+          </div>
         ) : grupos.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">No hay grupos registrados</div>
+          <div className="text-center py-12">
+            <BookOpen className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+            <p className="text-gray-500 mb-2">No hay grupos registrados</p>
+            <p className="text-sm text-gray-400">Crea el primer grupo para comenzar</p>
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -305,7 +390,6 @@ export default function GroupManagement() {
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Grupo</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Docente</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Periodo</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Inscritos</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Estado</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Acciones</th>
                 </tr>
@@ -324,18 +408,15 @@ export default function GroupManagement() {
                         {grupo.periodo_academico}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-sm">
-                      <span className={`font-semibold ${
-                        grupo.inscritos >= grupo.cupo_maximo ? 'text-red-600' : 'text-blue-600'
-                      }`}>
-                        {grupo.inscritos} / {grupo.cupo_maximo}
-                      </span>
-                    </td>
+                   
                     <td className="px-4 py-3">
                       <button
                         onClick={() => toggleGroupStatus(grupo)}
-                        className={`px-3 py-1 rounded-full text-xs font-medium ${
-                          grupo.esta_activo ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                        disabled={loading}
+                        className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                          grupo.esta_activo 
+                            ? 'bg-green-100 text-green-800 hover:bg-green-200' 
+                            : 'bg-gray-100 text-gray-800 hover:bg-gray-200'
                         }`}
                       >
                         {grupo.esta_activo ? 'Activo' : 'Inactivo'}
@@ -344,12 +425,10 @@ export default function GroupManagement() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => {
-                            setSelectedGroup(grupo);
-                            setShowEnrollForm(true);
-                          }}
-                          className="text-green-600 hover:text-green-800 p-1"
-                          title="Inscribir estudiantes"
+                          onClick={() => handleOpenEnrollForm(grupo)}
+                          disabled={grupo.inscritos >= grupo.cupo_maximo}
+                          className="text-green-600 hover:text-green-800 p-1 disabled:text-gray-400 disabled:cursor-not-allowed"
+                          title={grupo.inscritos >= grupo.cupo_maximo ? 'Grupo lleno' : 'Inscribir estudiantes'}
                         >
                           <UserPlus className="w-4 h-4" />
                         </button>
@@ -377,6 +456,7 @@ export default function GroupManagement() {
         )}
       </div>
 
+      {/* Modal de formulario */}
       {showForm && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
@@ -384,7 +464,7 @@ export default function GroupManagement() {
               <h3 className="text-xl font-bold text-gray-800">
                 {editingGroup ? 'Editar Grupo' : 'Nuevo Grupo'}
               </h3>
-              <button onClick={() => { setShowForm(false); setEditingGroup(null); }} className="text-gray-500">
+              <button onClick={() => { setShowForm(false); setEditingGroup(null); }} className="text-gray-500 hover:text-gray-700">
                 <X className="w-6 h-6" />
               </button>
             </div>
@@ -397,6 +477,7 @@ export default function GroupManagement() {
                     value={formData.materia_id}
                     onChange={(e) => setFormData({ ...formData, materia_id: e.target.value })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    required
                   >
                     <option value="">Seleccionar materia</option>
                     {materias.map((m) => (
@@ -423,6 +504,7 @@ export default function GroupManagement() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Nombre del Grupo *</label>
                   <input
                     type="text"
+                    required
                     value={formData.nombre_grupo}
                     onChange={(e) => setFormData({ ...formData, nombre_grupo: e.target.value })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
@@ -431,9 +513,10 @@ export default function GroupManagement() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Periodo *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Periodo Académico *</label>
                   <input
                     type="text"
+                    required
                     value={formData.periodo_academico}
                     onChange={(e) => setFormData({ ...formData, periodo_academico: e.target.value })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
@@ -445,10 +528,11 @@ export default function GroupManagement() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Semestre *</label>
                   <input
                     type="number"
+                    required
                     min="1"
                     max="12"
                     value={formData.semestre_periodo}
-                    onChange={(e) => setFormData({ ...formData, semestre_periodo: parseInt(e.target.value) })}
+                    onChange={(e) => setFormData({ ...formData, semestre_periodo: parseInt(e.target.value) || 1 })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
@@ -457,9 +541,10 @@ export default function GroupManagement() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">Cupo Máximo *</label>
                   <input
                     type="number"
+                    required
                     min="1"
                     value={formData.cupo_maximo}
-                    onChange={(e) => setFormData({ ...formData, cupo_maximo: parseInt(e.target.value) })}
+                    onChange={(e) => setFormData({ ...formData, cupo_maximo: parseInt(e.target.value) || 40 })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
@@ -496,29 +581,42 @@ export default function GroupManagement() {
         </div>
       )}
 
+      {/* Modal de inscripción */}
       {showEnrollForm && selectedGroup && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-xl font-bold text-gray-800">
-                Inscribir - {selectedGroup.nombre_grupo}
+                Inscribir Estudiantes - {selectedGroup.nombre_grupo}
               </h3>
-              <button onClick={() => { setShowEnrollForm(false); setSelectedGroup(null); setSelectedStudents([]); }}>
+              <button 
+                onClick={() => { 
+                  setShowEnrollForm(false); 
+                  setSelectedGroup(null); 
+                  setSelectedStudents([]); 
+                }} 
+                className="text-gray-500 hover:text-gray-700"
+              >
                 <X className="w-6 h-6" />
               </button>
             </div>
 
-            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="text-sm text-blue-900">
-                <strong>Disponible:</strong> {selectedGroup.cupo_maximo - selectedGroup.inscritos} lugares
-              </p>
-            </div>
 
             <div className="space-y-2 max-h-96 overflow-y-auto mb-4">
               {estudiantes.map((est) => (
-                <label key={est.id} className="flex items-center gap-3 p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
+                <label 
+                  key={est.id} 
+                  className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${
+                    est.ya_inscrito 
+                      ? 'bg-gray-100 border-gray-300 cursor-not-allowed opacity-60' 
+                      : selectedStudents.includes(est.id)
+                      ? 'bg-blue-50 border-blue-300'
+                      : 'hover:bg-gray-50 border-gray-200'
+                  }`}
+                >
                   <input
                     type="checkbox"
+                    disabled={est.ya_inscrito}
                     checked={selectedStudents.includes(est.id)}
                     onChange={(e) => {
                       if (e.target.checked) {
@@ -527,11 +625,18 @@ export default function GroupManagement() {
                         setSelectedStudents(selectedStudents.filter(id => id !== est.id));
                       }
                     }}
-                    className="w-4 h-4 text-blue-600"
+                    className="w-4 h-4 text-blue-600 disabled:cursor-not-allowed"
                   />
                   <div className="flex-1">
                     <p className="font-medium">{est.apellido_paterno} {est.apellido_materno}, {est.nombre}</p>
-                    <p className="text-sm text-gray-600">{est.numero_control}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm text-gray-600">{est.numero_control}</p>
+                      {est.ya_inscrito && (
+                        <span className="text-xs px-2 py-0.5 bg-gray-200 text-gray-700 rounded-full">
+                          Ya inscrito
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </label>
               ))}
@@ -539,7 +644,11 @@ export default function GroupManagement() {
 
             <div className="flex gap-3 pt-4 border-t">
               <button
-                onClick={() => { setShowEnrollForm(false); setSelectedGroup(null); setSelectedStudents([]); }}
+                onClick={() => { 
+                  setShowEnrollForm(false); 
+                  setSelectedGroup(null); 
+                  setSelectedStudents([]); 
+                }}
                 className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
                 Cancelar
@@ -549,7 +658,7 @@ export default function GroupManagement() {
                 disabled={loading || selectedStudents.length === 0}
                 className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400"
               >
-                {loading ? 'Inscribiendo...' : `Inscribir ${selectedStudents.length}`}
+                {loading ? 'Inscribiendo...' : `Inscribir ${selectedStudents.length} estudiante${selectedStudents.length !== 1 ? 's' : ''}`}
               </button>
             </div>
           </div>

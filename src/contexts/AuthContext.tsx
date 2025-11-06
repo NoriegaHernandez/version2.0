@@ -1,4 +1,3 @@
-
 // src/contexts/AuthContext.tsx
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
@@ -63,12 +62,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .from('user_profiles')
         .select('*')
         .eq('id', userId)
-        .single();
+        .maybeSingle(); // Cambiar de .single() a .maybeSingle()
 
-      if (error) throw error;
-      setProfile(data);
+      if (error) {
+        console.error('Error loading profile:', error);
+        throw error;
+      }
+
+      if (!data) {
+        console.warn('No profile found for user:', userId);
+        // El perfil no existe todavía, esto puede pasar si el registro acaba de ocurrir
+        setProfile(null);
+      } else {
+        setProfile(data);
+      }
     } catch (error) {
       console.error('Error loading profile:', error);
+      setProfile(null);
     } finally {
       setLoading(false);
     }
